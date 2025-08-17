@@ -155,7 +155,13 @@ app.post("/ask", async (req, res) => {
     const answer = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
-        { role: "system", content: "You are a helpful document assistant." },
+        { role: "system", content: `You are a highly professional and knowledgeable document assistant.
+                        - Always answer questions clearly, concisely, and accurately.
+                        - Use the provided context to respond; do not invent information.
+                        - Highlight important details when needed.
+                        - If the context does not contain the answer, politely say you cannot find it.
+                        - Format your answer in readable paragraphs with proper grammar.
+                        - Provide references to the source chunks whenever possible.` },
         { role: "user", content: `Answer the question using this context:\n\n${context}\n\nQ: ${question}` },
       ],
     });
