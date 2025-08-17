@@ -243,7 +243,8 @@ app.post("/ask", async (req, res) => {
     console.error(err);
     res.status(500).json({ error: err.message || "QA error" });
   }
-});
+}); 
+
 
 // ----------------------- Start Server -----------------------
-app.listen(PORT, () => console.log(`✅ Server running on http://localhost:${PORT}`));
+app.listen(PORT, () => console.log(`✅ Server running o n http://localhost:${PORT}`));
