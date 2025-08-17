@@ -9,6 +9,7 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 const { OpenAI } = require("openai");
 const path = require("path");
+const urlModule = require("url");
 
 const app = express();
 const upload = multer({ dest: "uploads/" });
@@ -25,6 +26,11 @@ let CHUNKS = [];
 // Load previous chunks
 if (fs.existsSync(DATA_FILE)) {
   CHUNKS = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+}
+
+// Save chunks to file
+function saveChunks() {
+  fs.writeFileSync(DATA_FILE, JSON.stringify(CHUNKS, null, 2));
 }
 
 // ----------------------- Helper Functions -----------------------
@@ -75,7 +81,7 @@ async function processText(text, source = "file") {
   }));
 
   CHUNKS.push(...processed);
-  fs.writeFileSync(DATA_FILE, JSON.stringify(CHUNKS, null, 2));
+  saveChunks();
 
   return processed.length;
 }
@@ -117,7 +123,7 @@ app.post("/upload-file", upload.single("file"), async (req, res) => {
   }
 });
 
-// ----------------------- Website Upload -----------------------
+// ----------------------- Website Upload (single page) -----------------------
 app.post("/upload-website", async (req, res) => {
   try {
     const { url } = req.body;
@@ -137,6 +143,63 @@ app.post("/upload-website", async (req, res) => {
   }
 });
 
+// ----------------------- Full Website Upload (crawl all pages) -----------------------
+async function crawlWebsite(baseUrl, visited = new Set(), maxPages = 100) {
+  const pages = [];
+
+  async function crawl(url) {
+    if (visited.has(url) || pages.length >= maxPages) return;
+    visited.add(url);
+
+    try {
+      const { data } = await axios.get(url);
+      const $ = cheerio.load(data);
+
+      // Extract title + headings + body
+      const title = $("title").text();
+      const headings = $("h1, h2, h3").map((i, el) => $(el).text()).get().join("\n");
+      const bodyText = $("body").text().replace(/\s+/g, " ").trim();
+      const text = [title, headings, bodyText].filter(Boolean).join("\n\n");
+
+      if (text) pages.push({ url, text });
+
+      // Internal links
+      $("a[href]").each((i, el) => {
+        let link = $(el).attr("href");
+        if (!link) return;
+        const resolved = urlModule.resolve(baseUrl, link.split("#")[0]);
+        if (resolved.startsWith(baseUrl)) crawl(resolved);
+      });
+    } catch (err) {
+      console.error("Failed to fetch:", url, err.message);
+    }
+  }
+
+  await crawl(baseUrl);
+  return pages;
+}
+
+app.post("/upload-full-website", async (req, res) => {
+  try {
+    const { url } = req.body;
+    if (!url) return res.status(400).json({ error: "No URL provided" });
+
+    const pages = await crawlWebsite(url, new Set(), 100);
+    if (!pages.length) return res.status(400).json({ error: "No content found" });
+
+    let totalChunks = 0;
+    for (const page of pages) {
+      const chunksCount = await processText(page.text, page.url);
+      totalChunks += chunksCount;
+    }
+
+    res.json({ message: "Full website indexed", pagesIndexed: pages.length, totalChunks });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message || "Website processing error" });
+  }
+});
+
 // ----------------------- Ask Questions -----------------------
 app.post("/ask", async (req, res) => {
   try {
@@ -149,11 +212,7 @@ app.post("/ask", async (req, res) => {
       input: question,
     })).data[0].embedding;
 
-    // Rank chunks by similarity
-    const ranked = CHUNKS.map((c) => ({
-      ...c,
-      score: cosineSimilarity(qEmbed, c.embedding),
-    }))
+    const ranked = CHUNKS.map((c) => ({ ...c, score: cosineSimilarity(qEmbed, c.embedding) }))
       .sort((a, b) => b.score - a.score)
       .slice(0, 5);
 
@@ -164,13 +223,13 @@ app.post("/ask", async (req, res) => {
       messages: [
         {
           role: "system",
-          content: `You are a highly skilled and professional data analyst AI assistant.
-- Analyze and compare datasets from Excel, CSV, PDF, and reports.
-- Provide insights, highlight trends, and detect anomalies accurately.
-- Only use the uploaded data; do not invent information.
-- Answer questions concisely and clearly in readable paragraphs or tables.
-- Reference the source of each insight (sheet name, row, column) when possible.
-- If the data does not contain the answer, state politely that it cannot be determined from the provided data`,
+          content: `You are a highly skilled and professional data assistant.
+- Analyze and compare datasets from Excel, CSV, PDF, Word, and websites.
+- Provide insights, highlight trends, detect anomalies accurately.
+- Only use uploaded data; do not invent information.
+- Answer questions concisely in readable paragraphs or tables.
+- Reference the source of each insight when possible.
+- If data does not contain the answer, politely state so.`,
         },
         { role: "user", content: `Answer the question using this context:\n\n${context}\n\nQ: ${question}` },
       ],
