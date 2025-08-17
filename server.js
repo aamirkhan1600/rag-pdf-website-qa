@@ -22,38 +22,12 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const DATA_FILE = path.join(__dirname, "chunks.json");
 let CHUNKS = [];
 
-// Load previous chunks from file if exists
+// Load previous chunks
 if (fs.existsSync(DATA_FILE)) {
   CHUNKS = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
 }
 
-// Save chunks to file
-function saveChunks() {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(CHUNKS, null, 2));
-}
-
 // ----------------------- Helper Functions -----------------------
-function chunkText(text, chunkSize = 2000, overlap = 200) {
-  const chunks = [];
-  for (let i = 0; i < text.length; i += chunkSize - overlap) {
-    chunks.push(text.slice(i, i + chunkSize));
-  }
-  return chunks;
-}
-
-// Parallel embedding function
-async function embedTexts(texts) {
-  return await Promise.all(
-    texts.map(async (text) => {
-      const res = await openai.embeddings.create({
-        model: "text-embedding-3-small",
-        input: text,
-      });
-      return res.data[0].embedding;
-    })
-  );
-}
-
 function cosineSimilarity(a, b) {
   const dot = a.reduce((sum, val, i) => sum + val * b[i], 0);
   const magA = Math.sqrt(a.reduce((sum, val) => sum + val * val, 0));
@@ -61,18 +35,48 @@ function cosineSimilarity(a, b) {
   return dot / (magA * magB);
 }
 
-// Optimized processText for large files
+// Split text into chunks
+function chunkText(text, chunkSize = 1500, overlap = 300) {
+  const chunks = [];
+  for (let i = 0; i < text.length; i += chunkSize - overlap) {
+    chunks.push(text.slice(i, i + chunkSize));
+  }
+  return chunks;
+}
+
+// Batch embeddings (rate-limit safe)
+async function embedTextsBatch(texts, batchSize = 50) {
+  const embeddings = [];
+  for (let i = 0; i < texts.length; i += batchSize) {
+    const batch = texts.slice(i, i + batchSize);
+    const res = await Promise.all(
+      batch.map((text) =>
+        openai.embeddings.create({
+          model: "text-embedding-3-small",
+          input: text,
+        })
+      )
+    );
+    embeddings.push(...res.map((r) => r.data[0].embedding));
+    await new Promise((r) => setTimeout(r, 50)); // small delay to avoid RPM limit
+  }
+  return embeddings;
+}
+
+// Process text into chunks + embeddings
 async function processText(text, source = "file") {
   const chunks = chunkText(text);
-  const embeddings = await embedTexts(chunks);
+  const embeddings = await embedTextsBatch(chunks, 50);
+
   const processed = chunks.map((chunk, i) => ({
     id: `${source}_${Date.now()}_${i}`,
     text: chunk,
     embedding: embeddings[i],
   }));
-  CHUNKS.push(...processed); // append to existing chunks
-  saveChunks(); // persist to disk
-  console.log(`✅ Processed ${processed.length} chunks from ${source}`);
+
+  CHUNKS.push(...processed);
+  fs.writeFileSync(DATA_FILE, JSON.stringify(CHUNKS, null, 2));
+
   return processed.length;
 }
 
@@ -166,12 +170,9 @@ app.post("/ask", async (req, res) => {
 - Highlight important details when needed.
 - If the context does not contain the answer, politely say you cannot find it.
 - Format your answer in readable paragraphs with proper grammar.
-- Provide references to the source chunks whenever possible.`
+- Provide references to the source chunks whenever possible.`,
         },
-        {
-          role: "user",
-          content: `Answer the question using this context:\n\n${context}\n\nQ: ${question}`
-        },
+        { role: "user", content: `Answer the question using this context:\n\n${context}\n\nQ: ${question}` },
       ],
     });
 
